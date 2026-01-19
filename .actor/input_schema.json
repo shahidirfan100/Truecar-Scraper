@@ -1,0 +1,74 @@
+{
+    "title": "Truecar Used Car Scraper",
+    "description": "Scrape used car listings from Truecar. Provide a search URL or use car parameters.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrl": {
+            "title": "Start URL",
+            "type": "string",
+            "description": "Start scraping from a specific Truecar search URL.",
+            "editor": "textfield"
+        },
+        "make": {
+            "title": "Make",
+            "type": "string",
+            "description": "Car make (e.g., Chevrolet, Toyota).",
+            "editor": "textfield",
+            "prefill": "chevrolet"
+        },
+        "model": {
+            "title": "Model",
+            "type": "string",
+            "description": "Car model (e.g., Malibu, Camry).",
+            "editor": "textfield",
+            "prefill": "malibu"
+        },
+        "year_min": {
+            "title": "Minimum Year",
+            "type": "integer",
+            "description": "Minimum vehicle year.",
+            "editor": "number"
+        },
+        "year_max": {
+            "title": "Maximum Year",
+            "type": "integer",
+            "description": "Maximum vehicle year.",
+            "editor": "number"
+        },
+        "zip": {
+            "title": "ZIP Code",
+            "type": "string",
+            "description": "Filter by location ZIP code.",
+            "editor": "textfield"
+        },
+        "results_wanted": {
+            "title": "Maximum number of results",
+            "type": "integer",
+            "description": "The maximum number of results to collect.",
+            "minimum": 1,
+            "default": 20,
+            "editor": "number"
+        },
+        "max_pages": {
+            "title": "Maximum number of pages",
+            "type": "integer",
+            "description": "A safety cap on the number of pages to visit.",
+            "minimum": 1,
+            "editor": "number",
+            "default": 10
+        },
+        "proxyConfiguration": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Use Apify Proxy (Residential recommended).",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": ["RESIDENTIAL"]
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}

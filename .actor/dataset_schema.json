@@ -1,0 +1,88 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "listing_id",
+          "vin",
+          "year",
+          "make",
+          "model",
+          "trim",
+          "price",
+          "mileage",
+          "location",
+          "exterior_color",
+          "interior_color",
+          "fuel_type",
+          "transmission",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "listing_id": {
+            "label": "ID",
+            "format": "text"
+          },
+          "vin": {
+            "label": "VIN",
+            "format": "text"
+          },
+          "year": {
+            "label": "Year",
+            "format": "text"
+          },
+          "make": {
+            "label": "Make",
+            "format": "text"
+          },
+          "model": {
+            "label": "Model",
+            "format": "text"
+          },
+          "trim": {
+            "label": "Trim",
+            "format": "text"
+          },
+          "price": {
+            "label": "Price",
+            "format": "text"
+          },
+          "mileage": {
+            "label": "Mileage",
+            "format": "text"
+          },
+          "location": {
+            "label": "Location",
+            "format": "text"
+          },
+          "exterior_color": {
+            "label": "Ext Color",
+            "format": "text"
+          },
+          "interior_color": {
+            "label": "Int Color",
+            "format": "text"
+          },
+          "fuel_type": {
+            "label": "Fuel",
+            "format": "text"
+          },
+          "transmission": {
+            "label": "Transmission",
+            "format": "text"
+          },
+          "url": {
+            "label": "URL",
+            "format": "text"
+          }
+        }
+      }
+    }
+  }
+}
