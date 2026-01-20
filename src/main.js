@@ -135,10 +135,11 @@ const crawler = new CheerioCrawler({
                         const vehicle = l.vehicle || {};
                         const pricing = l.pricing || {};
                         const location = l.location || {};
+                        const vin = vehicle.vin || l.vin; // VIN is inside vehicle object
 
                         return {
                             listing_id: l.id,
-                            vin: l.vin,
+                            vin: vin,
                             year: vehicle.year,
                             make: vehicle.make?.name,
                             model: vehicle.model?.name,
@@ -153,7 +154,7 @@ const crawler = new CheerioCrawler({
                             transmission: vehicle.transmission,
                             engine: vehicle.engine,
                             condition: vehicle.condition,
-                            url: l.vin ? `https://www.truecar.com/used-cars-for-sale/listing/${l.vin}/` : null,
+                            url: vin ? `https://www.truecar.com/used-cars-for-sale/listing/${vin}/` : null,
                         };
                     }).filter(l => l.vin); // Only keep listings with VIN
 
