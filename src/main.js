@@ -1,5 +1,17 @@
-import { PlaywrightCrawler, Dataset } from 'crawlee';
+import { CheerioCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
+import { HeaderGenerator } from 'header-generator';
+
+// Initialize header generator with latest browsers for stealth
+const headerGenerator = new HeaderGenerator({
+    browsers: [
+        { name: 'chrome', minVersion: 120, maxVersion: 130 },
+        { name: 'firefox', minVersion: 115, maxVersion: 125 }
+    ],
+    devices: ['desktop'],
+    operatingSystems: ['windows', 'macos'],
+    locales: ['en-US'],
+});
 
 await Actor.init();
 
@@ -31,7 +43,7 @@ const buildUrl = () => {
 
 const initialUrl = buildUrl();
 
-// Create proxy configuration (residential recommended for protected sites)
+// Create proxy configuration
 const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig || {
     useApifyProxy: true,
     apifyProxyGroups: ['RESIDENTIAL'],
@@ -40,84 +52,76 @@ const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig || {
 let savedCount = 0;
 const seenVins = new Set();
 
-const crawler = new PlaywrightCrawler({
+const crawler = new CheerioCrawler({
     proxyConfiguration,
     maxRequestRetries: 5,
     useSessionPool: true,
     sessionPoolOptions: {
-        maxPoolSize: 5,
-        sessionOptions: { maxUsageCount: 3 },
-    },
-    maxConcurrency: 2,
-    requestHandlerTimeoutSecs: 180,
-    navigationTimeoutSecs: 90,
-
-    // Fingerprint generation for stealth
-    browserPoolOptions: {
-        useFingerprints: true,
-        fingerprintOptions: {
-            fingerprintGeneratorOptions: {
-                browsers: ['chrome'],
-                operatingSystems: ['windows', 'macos'],
-                devices: ['desktop'],
-            },
+        maxPoolSize: 50,
+        sessionOptions: {
+            maxUsageCount: 10,
+            maxErrorScore: 3,
         },
     },
+    maxConcurrency: 3, // Lower for better stealth and residential proxy stability
 
-    // Pre-navigation hooks for resource blocking and stealth
     preNavigationHooks: [
-        async ({ page }) => {
-            // Block heavy resources
-            await page.route('**/*', (route) => {
-                const type = route.request().resourceType();
-                const url = route.request().url();
-
-                if (['image', 'font', 'media'].includes(type) ||
-                    url.includes('google-analytics') ||
-                    url.includes('googletagmanager') ||
-                    url.includes('facebook') ||
-                    url.includes('doubleclick')) {
-                    return route.abort();
-                }
-                return route.continue();
+        async ({ request }) => {
+            // Generate complete realistic headers with client hints
+            const headers = headerGenerator.getHeaders({
+                operatingSystems: ['windows'],
+                browsers: ['chrome'],
+                devices: ['desktop'],
+                locales: ['en-US'],
             });
 
-            // Stealth: Hide webdriver property
-            await page.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-            });
+            // Add complete client hint headers for modern browsers
+            request.headers = {
+                ...headers,
+                'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-platform-version': '"15.0.0"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'none',
+                'sec-fetch-user': '?1',
+                'upgrade-insecure-requests': '1',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.9',
+                'accept-encoding': 'gzip, deflate, br',
+                'cache-control': 'max-age=0',
+            };
+
+            // Human-like delay with jitter (reading time simulation)
+            const delay = Math.random() * 2000 + 1000;  // 1-3 seconds
+            await new Promise(r => setTimeout(r, delay));
         },
     ],
 
-    async requestHandler({ page, request, crawler: crawlerInstance }) {
+    async requestHandler({ $, request, body, session }) {
         log.info(`Processing: ${request.url}`);
-
-        // Wait for page to fully load
-        try {
-            await page.waitForLoadState('domcontentloaded');
-            // Give it a bit more time for hydration
-            await page.waitForTimeout(2000);
-        } catch (e) {
-            log.warning(`Wait failed: ${e.message}`);
-        }
 
         let listings = [];
 
-        // PRIORITY 1: Extract from __NEXT_DATA__
-        try {
-            listings = await page.evaluate(() => {
-                const script = document.querySelector('script#__NEXT_DATA__');
-                if (!script) return [];
+        // PRIORITY 1: Extract from __NEXT_DATA__ (fastest method)
+        const nextDataScript = $('script#__NEXT_DATA__').text();
+        if (nextDataScript) {
+            try {
+                const json = JSON.parse(nextDataScript);
+                const apolloState = json.props?.pageProps?.__APOLLO_STATE__;
 
-                try {
-                    const json = JSON.parse(script.textContent);
-                    const apolloState = json.props?.pageProps?.__APOLLO_STATE__;
+                if (apolloState) {
+                    log.debug(`Apollo State has ${Object.keys(apolloState).length} keys`);
 
-                    if (!apolloState) return [];
+                    // Extract all ConsumerSummaryListing objects
+                    const listingObjects = Object.values(apolloState).filter(obj =>
+                        obj?.__typename === 'ConsumerSummaryListing'
+                    );
 
-                    return Object.values(apolloState).filter(obj =>
-                        obj?.__typename === 'ConsumerSummaryListing' && obj.vin
-                    ).map(l => {
+                    log.debug(`Found ${listingObjects.length} ConsumerSummaryListing objects`);
+
+                    listings = listingObjects.map(l => {
                         const vehicle = l.vehicle || {};
                         const pricing = l.pricing || {};
                         const location = l.location || {};
@@ -128,7 +132,8 @@ const crawler = new PlaywrightCrawler({
                             year: vehicle.year,
                             make: vehicle.make?.name,
                             model: vehicle.model?.name,
-                            trim: vehicle.trim?.name,
+                            trim: vehicle.style?.trimName || vehicle.trim?.name,
+                            style: vehicle.style?.name,
                             price: pricing.listPrice,
                             mileage: vehicle.mileage,
                             location: location.city && location.state ? `${location.city}, ${location.state}` : null,
@@ -136,80 +141,46 @@ const crawler = new PlaywrightCrawler({
                             interior_color: vehicle.interiorColor,
                             fuel_type: vehicle.fuelType,
                             transmission: vehicle.transmission,
-                            url: `https://www.truecar.com/used-cars-for-sale/listing/${vehicle.make?.slug}/${vehicle.model?.slug}/${l.vin}/`,
-                            _source: 'next_data'
+                            engine: vehicle.engine,
+                            condition: vehicle.condition,
+                            url: l.vin ? `https://www.truecar.com/used-cars-for-sale/listing/${l.vin}/` : null,
                         };
-                    });
-                } catch (e) {
-                    return [];
+                    }).filter(l => l.vin); // Only keep listings with VIN
+
+                    log.info(`✅ Extracted ${listings.length} listings from __NEXT_DATA__`);
+                } else {
+                    log.warning('No __APOLLO_STATE__ found in __NEXT_DATA__');
                 }
-            });
-
-            if (listings.length > 0) {
-                log.info(`Extracted ${listings.length} listings from __NEXT_DATA__`);
+            } catch (e) {
+                log.error(`Failed to parse __NEXT_DATA__: ${e.message}`);
+                log.debug(`Error stack: ${e.stack}`);
             }
-        } catch (e) {
-            log.warning(`Failed to extract __NEXT_DATA__: ${e.message}`);
+        } else {
+            log.warning('No __NEXT_DATA__ script tag found');
         }
 
-        // PRIORITY 2: DOM Fallback
+        // Check for blocking
+        const title = $('title').text();
+        if (title.includes('Access Denied') || title.includes('Captcha') || title.includes('Robot')) {
+            log.error('🚫 BLOCKED! Page title suggests anti-bot detection.');
+            await Actor.setValue(`blocked-page-${Date.now()}`, $.html(), { contentType: 'text/html' });
+        }
+
+        // Save debug info if no data found
         if (listings.length === 0) {
-            log.warning('No data found in __NEXT_DATA__, attempting DOM fallback...');
+            log.warning('⚠️ No listings extracted. Saving debug HTML...');
+            await Actor.setValue(`debug-page-${Date.now()}`, $.html(), { contentType: 'text/html' });
 
-            // Wait for cards to appear
-            try {
-                await page.waitForSelector('[data-test="usedListing"], [data-test="vehicleCard"]', { timeout: 10000 });
-            } catch (e) { }
-
-            listings = await page.evaluate(() => {
-                const items = [];
-                // Look for cards
-                const cards = document.querySelectorAll('[data-test="usedListing"], [data-test="vehicleCard"], .vehicle-card');
-
-                cards.forEach(el => {
-                    const getTxt = (sel) => el.querySelector(sel)?.innerText?.trim();
-                    const getAttr = (sel, attr) => el.querySelector(sel)?.getAttribute(attr);
-
-                    const yearEl = el.querySelector('[data-test="vehicleCardYear"]');
-                    const makeEl = el.querySelector('[data-test="vehicleCardMake"]');
-                    const modelEl = el.querySelector('[data-test="vehicleCardModel"]');
-                    const priceEl = el.querySelector('[data-test="vehicleCardPrice"]');
-                    const mileageEl = el.querySelector('[data-test="vehicleCardMileage"]');
-                    const linkEl = el.querySelector('a[data-test="vehicleCardLink"]');
-
-                    if (yearEl && makeEl && modelEl) {
-                        items.push({
-                            year: parseInt(yearEl.innerText) || null,
-                            make: makeEl.innerText || null,
-                            model: modelEl.innerText || null,
-                            price: priceEl ? parseInt(priceEl.innerText.replace(/[^0-9]/g, '')) : null,
-                            mileage: mileageEl ? parseInt(mileageEl.innerText.replace(/[^0-9]/g, '')) : null,
-                            url: linkEl ? (linkEl.href.startsWith('http') ? linkEl.href : `https://www.truecar.com${linkEl.getAttribute('href')}`) : null,
-                            _source: 'dom_fallback'
-                        });
-                    }
-                });
-                return items;
-            });
-
-            if (listings.length > 0) {
-                log.info(`Extracted ${listings.length} listings from DOM`);
-            }
+            // Log response info
+            log.info(`Response length: ${body?.length || $.html().length} bytes`);
+            log.info(`Page title: ${title}`);
         }
 
-        if (listings.length === 0) {
-            log.warning('No listings found. Saving screenshot/debug info...');
-            await Actor.setValue(`debug-page-${Date.now()}`, await page.content(), { contentType: 'text/html' });
-        }
-
-        // Save data
+        // Deduplicate and save data
         const uniqueListings = listings.filter(l => {
-            if (l.vin && seenVins.has(l.vin)) return false;
-            // Also dedupe by URL if VIN missing
-            if (!l.vin && l.url && seenVins.has(l.url)) return false;
-
-            const id = l.vin || l.url;
-            if (id) seenVins.add(id);
+            const id = l.vin || l.listing_id || l.url;
+            if (!id || seenVins.has(id)) return false;
+            seenVins.add(id);
             return true;
         });
 
@@ -219,37 +190,42 @@ const crawler = new PlaywrightCrawler({
         if (toSave.length > 0) {
             await Dataset.pushData(toSave);
             savedCount += toSave.length;
-            log.info(`Saved ${toSave.length} listings. Progress: ${savedCount}/${results_wanted}`);
+            log.info(`💾 Saved ${toSave.length} listings. Progress: ${savedCount}/${results_wanted}`);
         }
 
-        // Pagination
+        // Pagination - only if we need more results
         if (savedCount < results_wanted) {
-            const nextUrl = await page.evaluate(() => {
-                const nextBtn = document.querySelector('a[data-test="pagination-next"]');
-                return nextBtn ? nextBtn.href : null;
-            });
+            // Try to find next page link
+            const nextLink = $('a[data-test="pagination-next"]').attr('href') ||
+                $('a[aria-label*="Next"]').attr('href') ||
+                $('a.pagination-next').attr('href');
 
-            if (nextUrl) {
-                log.info(`Navigating to next page: ${nextUrl}`);
-                await crawlerInstance.addRequests([{ url: nextUrl }]);
+            if (nextLink) {
+                const nextUrl = nextLink.startsWith('http') ? nextLink : `https://www.truecar.com${nextLink}`;
+                log.info(`➡️ Navigating to next page: ${nextUrl}`);
+                await crawler.addRequests([{ url: nextUrl }]);
             } else {
-                // Construct URL fallback if next button logic fails or is hidden
+                // Construct URL fallback
                 const currentUrl = new URL(request.url);
                 const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
                 if (currentPage < max_pages) {
                     currentUrl.searchParams.set('page', (currentPage + 1).toString());
-                    log.info(`Constructing next page URL: ${currentUrl.href}`);
-                    await crawlerInstance.addRequests([{ url: currentUrl.href }]);
+                    log.info(`➡️ Constructing next page URL: ${currentUrl.href}`);
+                    await crawler.addRequests([{ url: currentUrl.href }]);
+                } else {
+                    log.info('✋ Reached max_pages limit or no more pages available.');
                 }
             }
+        } else {
+            log.info('✅ Reached desired results_wanted count.');
         }
     },
 
     failedRequestHandler({ request }, error) {
-        log.error(`Request ${request.url} failed: ${error.message}`);
+        log.error(`❌ Request ${request.url} failed: ${error.message}`);
     },
 });
 
 await crawler.run([{ url: initialUrl }]);
-log.info('Scraper finished.');
+log.info('🎉 Scraper finished successfully!');
 await Actor.exit();

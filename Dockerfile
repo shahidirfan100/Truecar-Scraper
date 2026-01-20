@@ -1,25 +1,16 @@
-# Specify the base Docker image with Playwright + Chrome
-FROM apify/actor-node-playwright-chrome:22-1.56.1
+FROM alpine:latest
 
-# Check preinstalled packages
-RUN npm ls crawlee apify puppeteer playwright
+RUN apk add --no-cache nodejs npm
 
-COPY --chown=myuser:myuser package*.json Dockerfile ./
+RUN addgroup app && adduser app -G app -D
+WORKDIR /home/app
+USER app
 
-# Ensure Playwright version matches
-RUN node check-playwright-version.mjs
+COPY --chown=app:app package*.json ./
+RUN npm i --omit=dev && rm -r ~/.npm || true
 
-# Install NPM packages (production only)
-RUN npm --quiet set progress=false \
-    && npm install --omit=dev --omit=optional \
-    && echo "Installed NPM packages:" \
-    && (npm list --omit=dev --all || true) \
-    && echo "Node.js version:" \
-    && node --version \
-    && echo "NPM version:" \
-    && npm --version \
-    && rm -r ~/.npm
+COPY --chown=app:app . ./
 
-COPY --chown=myuser:myuser . ./
+ENV APIFY_LOG_LEVEL=INFO
 
 CMD npm start --silent
