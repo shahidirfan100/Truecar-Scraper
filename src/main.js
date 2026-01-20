@@ -1,6 +1,5 @@
+import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
-import { HeaderGenerator } from 'header-generator';
 
 await Actor.init();
 
@@ -14,7 +13,7 @@ const {
     zip,
     results_wanted = 20,
     max_pages = 10,
-    proxyConfiguration,
+    proxyConfiguration: proxyConfig,
 } = input;
 
 // Build initial URL if not provided
@@ -31,38 +30,92 @@ const buildUrl = () => {
 };
 
 const initialUrl = buildUrl();
-const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
 
-const headerGenerator = new HeaderGenerator({
-    browsers: [{ name: 'chrome', minVersion: 120 }],
-    devices: ['desktop'],
-    operatingSystems: ['windows'],
+// Create proxy configuration (residential recommended for protected sites)
+const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig || {
+    useApifyProxy: true,
+    apifyProxyGroups: ['RESIDENTIAL'],
 });
 
 let savedCount = 0;
 const seenVins = new Set();
 
-const crawler = new CheerioCrawler({
-    proxyConfiguration: proxyConf,
-    maxConcurrency: 5,
-    maxRequestRetries: 3,
+const crawler = new PlaywrightCrawler({
+    proxyConfiguration,
+    maxRequestRetries: 5,
     useSessionPool: true,
+    sessionPoolOptions: {
+        maxPoolSize: 5,
+        sessionOptions: { maxUsageCount: 3 },
+    },
+    maxConcurrency: 2,
+    requestHandlerTimeoutSecs: 180,
+    navigationTimeoutSecs: 90,
 
-    async requestHandler({ $, request, enqueueLinks, body }) {
-        const pageNo = request.userData?.pageNo || 1;
-        log.info(`Processing ${request.url} (Page ${pageNo})`);
+    // Fingerprint generation for stealth
+    browserPoolOptions: {
+        useFingerprints: true,
+        fingerprintOptions: {
+            fingerprintGeneratorOptions: {
+                browsers: ['chrome'],
+                operatingSystems: ['windows', 'macos'],
+                devices: ['desktop'],
+            },
+        },
+    },
+
+    // Pre-navigation hooks for resource blocking and stealth
+    preNavigationHooks: [
+        async ({ page }) => {
+            // Block heavy resources
+            await page.route('**/*', (route) => {
+                const type = route.request().resourceType();
+                const url = route.request().url();
+
+                if (['image', 'font', 'media'].includes(type) ||
+                    url.includes('google-analytics') ||
+                    url.includes('googletagmanager') ||
+                    url.includes('facebook') ||
+                    url.includes('doubleclick')) {
+                    return route.abort();
+                }
+                return route.continue();
+            });
+
+            // Stealth: Hide webdriver property
+            await page.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            });
+        },
+    ],
+
+    async requestHandler({ page, request, crawler: crawlerInstance }) {
+        log.info(`Processing: ${request.url}`);
+
+        // Wait for page to fully load
+        try {
+            await page.waitForLoadState('domcontentloaded');
+            // Give it a bit more time for hydration
+            await page.waitForTimeout(2000);
+        } catch (e) {
+            log.warning(`Wait failed: ${e.message}`);
+        }
 
         let listings = [];
 
         // PRIORITY 1: Extract from __NEXT_DATA__
-        const scriptContent = $('script#__NEXT_DATA__').text();
-        if (scriptContent) {
-            try {
-                const nextData = JSON.parse(scriptContent);
-                const apolloState = nextData.props?.pageProps?.__APOLLO_STATE__;
+        try {
+            listings = await page.evaluate(() => {
+                const script = document.querySelector('script#__NEXT_DATA__');
+                if (!script) return [];
 
-                if (apolloState) {
-                    listings = Object.values(apolloState).filter(obj =>
+                try {
+                    const json = JSON.parse(script.textContent);
+                    const apolloState = json.props?.pageProps?.__APOLLO_STATE__;
+
+                    if (!apolloState) return [];
+
+                    return Object.values(apolloState).filter(obj =>
                         obj?.__typename === 'ConsumerSummaryListing' && obj.vin
                     ).map(l => {
                         const vehicle = l.vehicle || {};
@@ -87,47 +140,76 @@ const crawler = new CheerioCrawler({
                             _source: 'next_data'
                         };
                     });
-
-                    if (listings.length > 0) {
-                        log.info(`Extracted ${listings.length} listings from __NEXT_DATA__`);
-                    }
+                } catch (e) {
+                    return [];
                 }
-            } catch (err) {
-                log.error(`Failed to parse __NEXT_DATA__: ${err.message}`);
-            }
-        }
-
-        // PRIORITY 2: Fallback to HTML parsing if NEXT_DATA fails or is empty
-        if (listings.length === 0) {
-            log.warning('No data found in __NEXT_DATA__, attempting HTML fallback...');
-            listings = $('[data-test="cardContent"]').map((_, el) => {
-                const $el = $(el);
-                return {
-                    year: parseInt($el.find('[data-test="vehicleCardYear"]').text()) || null,
-                    make: $el.find('[data-test="vehicleCardMake"]').text().trim() || null,
-                    model: $el.find('[data-test="vehicleCardModel"]').text().trim() || null,
-                    price: parseInt($el.find('[data-test="vehicleCardPrice"]').text().replace(/[^0-9]/g, '')) || null,
-                    mileage: parseInt($el.find('[data-test="vehicleCardMileage"]').text().replace(/[^0-9]/g, '')) || null,
-                    url: $el.find('a[data-test="vehicleCardLink"]').attr('href') ?
-                        new URL($el.find('a[data-test="vehicleCardLink"]').attr('href'), 'https://www.truecar.com').href : null,
-                    _source: 'html_fallback'
-                };
-            }).get().filter(l => l.make && l.model);
+            });
 
             if (listings.length > 0) {
-                log.info(`Extracted ${listings.length} listings from HTML`);
+                log.info(`Extracted ${listings.length} listings from __NEXT_DATA__`);
+            }
+        } catch (e) {
+            log.warning(`Failed to extract __NEXT_DATA__: ${e.message}`);
+        }
+
+        // PRIORITY 2: DOM Fallback
+        if (listings.length === 0) {
+            log.warning('No data found in __NEXT_DATA__, attempting DOM fallback...');
+
+            // Wait for cards to appear
+            try {
+                await page.waitForSelector('[data-test="usedListing"], [data-test="vehicleCard"]', { timeout: 10000 });
+            } catch (e) { }
+
+            listings = await page.evaluate(() => {
+                const items = [];
+                // Look for cards
+                const cards = document.querySelectorAll('[data-test="usedListing"], [data-test="vehicleCard"], .vehicle-card');
+
+                cards.forEach(el => {
+                    const getTxt = (sel) => el.querySelector(sel)?.innerText?.trim();
+                    const getAttr = (sel, attr) => el.querySelector(sel)?.getAttribute(attr);
+
+                    const yearEl = el.querySelector('[data-test="vehicleCardYear"]');
+                    const makeEl = el.querySelector('[data-test="vehicleCardMake"]');
+                    const modelEl = el.querySelector('[data-test="vehicleCardModel"]');
+                    const priceEl = el.querySelector('[data-test="vehicleCardPrice"]');
+                    const mileageEl = el.querySelector('[data-test="vehicleCardMileage"]');
+                    const linkEl = el.querySelector('a[data-test="vehicleCardLink"]');
+
+                    if (yearEl && makeEl && modelEl) {
+                        items.push({
+                            year: parseInt(yearEl.innerText) || null,
+                            make: makeEl.innerText || null,
+                            model: modelEl.innerText || null,
+                            price: priceEl ? parseInt(priceEl.innerText.replace(/[^0-9]/g, '')) : null,
+                            mileage: mileageEl ? parseInt(mileageEl.innerText.replace(/[^0-9]/g, '')) : null,
+                            url: linkEl ? (linkEl.href.startsWith('http') ? linkEl.href : `https://www.truecar.com${linkEl.getAttribute('href')}`) : null,
+                            _source: 'dom_fallback'
+                        });
+                    }
+                });
+                return items;
+            });
+
+            if (listings.length > 0) {
+                log.info(`Extracted ${listings.length} listings from DOM`);
             }
         }
 
         if (listings.length === 0) {
-            log.warning('No data extracted! Saving debug HTML...');
-            await Actor.setValue(`debug_page_pg${pageNo}`, body || $.html(), { contentType: 'text/html' });
+            log.warning('No listings found. Saving screenshot/debug info...');
+            await Actor.setValue(`debug-page-${Date.now()}`, await page.content(), { contentType: 'text/html' });
         }
 
-        // Deduplicate and push data
+        // Save data
         const uniqueListings = listings.filter(l => {
             if (l.vin && seenVins.has(l.vin)) return false;
-            if (l.vin) seenVins.add(l.vin);
+            // Also dedupe by URL if VIN missing
+            if (!l.vin && l.url && seenVins.has(l.url)) return false;
+
+            const id = l.vin || l.url;
+            if (id) seenVins.add(id);
             return true;
         });
 
@@ -141,44 +223,33 @@ const crawler = new CheerioCrawler({
         }
 
         // Pagination
-        if (savedCount < results_wanted && pageNo < max_pages) {
-            // Find next page from UI if possible, else construct URL
-            const nextButton = $('a[data-test="pagination-next"]');
-            let nextUrl;
-
-            if (nextButton.attr('href')) {
-                nextUrl = new URL(nextButton.attr('href'), 'https://www.truecar.com').href;
-            } else {
-                const u = new URL(request.url);
-                u.searchParams.set('page', (pageNo + 1).toString());
-                nextUrl = u.href;
-            }
-
-            await enqueueLinks({
-                urls: [nextUrl],
-                userData: { pageNo: pageNo + 1 }
+        if (savedCount < results_wanted) {
+            const nextUrl = await page.evaluate(() => {
+                const nextBtn = document.querySelector('a[data-test="pagination-next"]');
+                return nextBtn ? nextBtn.href : null;
             });
+
+            if (nextUrl) {
+                log.info(`Navigating to next page: ${nextUrl}`);
+                await crawlerInstance.addRequests([{ url: nextUrl }]);
+            } else {
+                // Construct URL fallback if next button logic fails or is hidden
+                const currentUrl = new URL(request.url);
+                const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
+                if (currentPage < max_pages) {
+                    currentUrl.searchParams.set('page', (currentPage + 1).toString());
+                    log.info(`Constructing next page URL: ${currentUrl.href}`);
+                    await crawlerInstance.addRequests([{ url: currentUrl.href }]);
+                }
+            }
         }
     },
 
-    preNavigationHooks: [
-        async ({ request }) => {
-            const headers = headerGenerator.getHeaders();
-            request.headers = {
-                ...headers,
-                'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'none',
-                'sec-fetch-user': '?1',
-                'upgrade-insecure-requests': '1',
-            };
-        }
-    ]
+    failedRequestHandler({ request }, error) {
+        log.error(`Request ${request.url} failed: ${error.message}`);
+    },
 });
 
-await crawler.run([{ url: initialUrl, userData: { pageNo: 1 } }]);
+await crawler.run([{ url: initialUrl }]);
 log.info('Scraper finished.');
 await Actor.exit();
