@@ -31,13 +31,23 @@ const {
 // Build initial URL if not provided
 const buildUrl = () => {
     if (startUrl) return startUrl;
-    const baseUrl = 'https://www.truecar.com/used-cars-for-sale/listings/';
+
+    // TrueCar uses path-based URLs: /make/model/ not query params
+    let baseUrl = 'https://www.truecar.com/used-cars-for-sale/listings/';
+
+    // Add make and model as path segments
+    if (make && model) {
+        baseUrl += `${make.toLowerCase()}/${model.toLowerCase()}/`;
+    } else if (make) {
+        baseUrl += `${make.toLowerCase()}/`;
+    }
+
+    // Add filters as query parameters
     const u = new URL(baseUrl);
-    if (make) u.searchParams.set('makeSlug', make.toLowerCase());
-    if (model) u.searchParams.set('modelSlug', model.toLowerCase());
     if (year_min) u.searchParams.set('yearMin', year_min);
     if (year_max) u.searchParams.set('yearMax', year_max);
     if (zip) u.searchParams.set('zip', zip);
+
     return u.href;
 };
 
