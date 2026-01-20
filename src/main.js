@@ -134,8 +134,18 @@ const crawler = new CheerioCrawler({
                     listings = listingObjects.map(l => {
                         const vehicle = l.vehicle || {};
                         const pricing = l.pricing || {};
-                        const location = l.location || {};
-                        const vin = vehicle.vin || l.vin; // VIN is inside vehicle object
+                        const vin = vehicle.vin || l.vin;
+
+                        // Resolve dealership reference for location data
+                        let dealership = null;
+                        let locationStr = null;
+                        if (l.dealership?.__ref) {
+                            dealership = apolloState[l.dealership.__ref];
+                            const geo = dealership?.location?.geolocation;
+                            if (geo?.city && geo?.state) {
+                                locationStr = `${geo.city}, ${geo.state}`;
+                            }
+                        }
 
                         return {
                             listing_id: l.id,
@@ -147,7 +157,8 @@ const crawler = new CheerioCrawler({
                             style: vehicle.style?.name,
                             price: pricing.listPrice,
                             mileage: vehicle.mileage,
-                            location: location.city && location.state ? `${location.city}, ${location.state}` : null,
+                            location: locationStr,
+                            dealership_name: dealership?.name,
                             exterior_color: vehicle.exteriorColor,
                             interior_color: vehicle.interiorColor,
                             fuel_type: vehicle.fuelType,
