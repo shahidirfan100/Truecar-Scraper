@@ -110,7 +110,6 @@ const crawler = new CheerioCrawler({
     ],
 
     async requestHandler({ $, request, body, session }) {
-        log.info(`Processing: ${request.url}`);
 
         let listings = [];
 
@@ -122,14 +121,11 @@ const crawler = new CheerioCrawler({
                 const apolloState = json.props?.pageProps?.__APOLLO_STATE__;
 
                 if (apolloState) {
-                    log.debug(`Apollo State has ${Object.keys(apolloState).length} keys`);
 
                     // Extract all ConsumerSummaryListing objects
                     const listingObjects = Object.values(apolloState).filter(obj =>
                         obj?.__typename === 'ConsumerSummaryListing'
                     );
-
-                    log.debug(`Found ${listingObjects.length} ConsumerSummaryListing objects`);
 
                     listings = listingObjects.map(l => {
                         const vehicle = l.vehicle || {};
@@ -169,7 +165,7 @@ const crawler = new CheerioCrawler({
                         };
                     }).filter(l => l.vin); // Only keep listings with VIN
 
-                    log.info(`✅ Extracted ${listings.length} listings from __NEXT_DATA__`);
+                    log.info(`Extracted ${listings.length} listings from Apollo State JSON API`);
                 } else {
                     log.warning('No __APOLLO_STATE__ found in __NEXT_DATA__');
                 }
@@ -184,18 +180,13 @@ const crawler = new CheerioCrawler({
         // Check for blocking
         const title = $('title').text();
         if (title.includes('Access Denied') || title.includes('Captcha') || title.includes('Robot')) {
-            log.error('🚫 BLOCKED! Page title suggests anti-bot detection.');
+            log.error('BLOCKED - anti-bot detection triggered');
             await Actor.setValue(`blocked-page-${Date.now()}`, $.html(), { contentType: 'text/html' });
         }
 
-        // Save debug info if no data found
         if (listings.length === 0) {
-            log.warning('⚠️ No listings extracted. Saving debug HTML...');
+            log.warning('No listings extracted, saving debug HTML');
             await Actor.setValue(`debug-page-${Date.now()}`, $.html(), { contentType: 'text/html' });
-
-            // Log response info
-            log.info(`Response length: ${body?.length || $.html().length} bytes`);
-            log.info(`Page title: ${title}`);
         }
 
         // Deduplicate and save data
@@ -212,7 +203,7 @@ const crawler = new CheerioCrawler({
         if (toSave.length > 0) {
             await Dataset.pushData(toSave);
             savedCount += toSave.length;
-            log.info(`💾 Saved ${toSave.length} listings. Progress: ${savedCount}/${results_wanted}`);
+            log.info(`Saved ${toSave.length} listings (${savedCount}/${results_wanted})`);
         }
 
         // Pagination - only if we need more results
@@ -224,7 +215,7 @@ const crawler = new CheerioCrawler({
 
             if (nextLink) {
                 const nextUrl = nextLink.startsWith('http') ? nextLink : `https://www.truecar.com${nextLink}`;
-                log.info(`➡️ Navigating to next page: ${nextUrl}`);
+                log.debug(`Next page: ${nextUrl}`);
                 await crawler.addRequests([{ url: nextUrl }]);
             } else {
                 // Construct URL fallback
@@ -232,22 +223,22 @@ const crawler = new CheerioCrawler({
                 const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
                 if (currentPage < max_pages) {
                     currentUrl.searchParams.set('page', (currentPage + 1).toString());
-                    log.info(`➡️ Constructing next page URL: ${currentUrl.href}`);
+                    log.debug(`Next page: ${currentUrl.href}`);
                     await crawler.addRequests([{ url: currentUrl.href }]);
                 } else {
-                    log.info('✋ Reached max_pages limit or no more pages available.');
+                    log.info('Reached max_pages limit');
                 }
             }
         } else {
-            log.info('✅ Reached desired results_wanted count.');
+            log.info('Reached results_wanted limit');
         }
     },
 
     failedRequestHandler({ request }, error) {
-        log.error(`❌ Request ${request.url} failed: ${error.message}`);
+        log.error(`Request failed: ${request.url}`);
     },
 });
 
 await crawler.run([{ url: initialUrl }]);
-log.info('🎉 Scraper finished successfully!');
+log.info('Scraper completed');
 await Actor.exit();
